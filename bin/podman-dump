@@ -1,0 +1,424 @@
+#!/usr/bin/env python3
+
+import argparse
+import contextlib
+import glob
+import gzip
+import json
+import logging
+import shutil
+import subprocess
+import sys
+import tempfile
+from collections import abc
+from datetime import datetime
+from pathlib import Path
+from typing import BinaryIO, Optional, Sequence, Mapping
+
+
+class FilesystemRepository:
+    """
+    Represents a backup repository on the filesystem.
+    """
+    name: str
+    dumpdir: Path
+    compress: bool
+    extension: str
+    dateformat: str
+    part: Optional[str]
+    log = logging.getLogger("FilesystemRepository")
+
+    def __init__(
+        self,
+        name: str,
+        dumpdir: str,
+        compress: bool,
+        extension: str,
+        dateformat: str = "%Y%m%dT%H%M%S%z",
+        part: Optional[str] = None,
+    ):
+        self.name = name
+        self.dumpdir = Path(dumpdir)
+        self.compress = compress
+        self.extension = extension
+        self.dateformat = dateformat
+        self.part = part
+
+    def prefix(self) -> str:
+        """
+        Return path prefix for dumps in this repository.
+        """
+        return str(self.dumpdir.joinpath(f"{self.name}-"))
+
+    def suffix(self) -> str:
+        """
+        Return path suffix for dumps in this repository.
+        """
+        partstr = f"-{self.part}" if self.part else ""
+        extension = f"{self.extension}.gz" if self.compress else self.extension
+        return f"{partstr}{extension}"
+
+    def index(self) -> Sequence[Path]:
+        """
+        List existing dumps in this repository.
+        """
+        pattern = f"{self.prefix()}*{self.suffix()}"
+        candidates = sorted(glob.glob(pattern))
+        return [Path(p) for p in candidates if Path(p).is_file()]
+
+    def filepath(self, datestamp: Optional[datetime] = None) -> Path:
+        """
+        Return path to dump for the given datestamp.
+        """
+        if datestamp is None:
+            datestamp = datetime.now()
+
+        datestring = datestamp.strftime(self.dateformat)
+
+        return Path(f"{self.prefix()}{datestring}{self.suffix()}")
+
+    @contextlib.contextmanager
+    def open(self, datestamp: Optional[datetime] = None):
+        """
+        Create new dumpfile and return a writable stream.
+
+        Note: Returned object is a contextmanager. I.e.:
+
+            with repository.open() as outstream:
+                # do stuff here
+        """
+        outpath = self.filepath(datestamp)
+
+        with tempfile.NamedTemporaryFile(
+            dir=self.dumpdir,
+            delete=False,
+            mode="wb",
+        ) as outtemp:
+            if self.compress:
+                with gzip.GzipFile(
+                    filename=outpath,
+                    fileobj=outtemp,
+                    mode="wb"
+                ) as outcompress:
+                    yield outcompress
+            else:
+                yield outtemp
+
+        Path(outtemp.name).rename(outpath)
+        self.log.info("Dumped %s", outpath)
+
+    def prune(self, keep: int):
+        """
+        Prune repository, keep specified number of dump files.
+        """
+        files = self.index()
+        numprune = len(files)-keep
+
+        if numprune > 0:
+            self.log.debug("Start pruning %i out of %i files in dir %s",
+                           numprune, len(files), self.dumpdir)
+
+            for path in files[:-keep]:
+                path.unlink()
+                self.log.info("Pruned %s", path)
+
+            self.log.debug("Finished pruning %i out of %i files in dir %s",
+                           numprune, len(files), self.dumpdir)
+
+
+class JobConfig:
+    """
+    Encapsulates one dump job configuration retreived from container label.
+    """
+    entry: Mapping
+
+    def __init__(self, entry: Optional[Mapping] = None):
+        self.entry = entry if isinstance(entry, abc.Mapping) else {}
+
+    def schedules(self) -> Sequence[str]:
+        """
+        Return a list of schedules this job is configured for.
+        """
+        result = []
+
+        if 'schedules' in self.entry:
+            schedules = self.entry['schedules']
+            if isinstance(schedules, str):
+                result = [schedules]
+            elif isinstance(schedules, abc.Sequence):
+                result = [schedule for schedule in schedules if isinstance(schedule, str)]
+
+        return result
+
+    def compress(self) -> bool:
+        """
+        Returns True if the dump should be compressed.
+        """
+        return bool(self.entry.get('compress', False))
+
+    def extension(self) -> str:
+        """
+        Returns the file extension which should be added to the dump file.
+        """
+        return str(self.entry.get('extension', ''))
+
+    def part(self) -> Optional[str]:
+        """
+        Returns the optional part of the dump (e.g., schema or data).
+        """
+        result = None
+
+        if 'part' in self.entry:
+            result = str(self.entry['part'])
+
+        return result
+
+    def keep(self) -> int:
+        """
+        Returns number of items to keep on prune-phase.
+        """
+        return int(self.entry.get('keep', 0))
+
+    def execargs(self) -> Sequence[str]:
+        """
+        Returns args for podman exec.
+        """
+        result = []
+
+        if 'env' in self.entry and isinstance(self.entry['env'], abc.Mapping):
+            for key, value in self.entry['env'].items():
+                result.append('--env')
+                result.append(f"{key}={value}")
+
+        if 'env_file' in self.entry:
+            result.append('--env-file')
+            result.append(str(self.entry['env_file']))
+
+        if bool(self.entry.get('interactive', False)):
+            result.append('--interactive')
+
+        if bool(self.entry.get('tty', False)):
+            result.append('--tty')
+
+        if 'user' in self.entry:
+            result.append('--user')
+            result.append(str(self.entry['user']))
+
+        if 'workdir' in self.entry:
+            result.append('--workdir')
+            result.append(str(self.entry['workdir']))
+
+        return result
+
+    def dumpcmd(self) -> Sequence[str]:
+        """
+        Returns the command which should be executed within the container.
+        """
+        result = []
+
+        if 'command' in self.entry:
+            argv = self.entry['command']
+            if isinstance(argv, str):
+                result = [argv]
+            elif isinstance(argv, abc.Sequence):
+                result = [arg for arg in argv if isinstance(arg, str)]
+
+        return result
+
+
+class Job:
+    """
+    Represents one dump job of a specific container
+    """
+    name: str
+    cid: str
+    config: JobConfig
+
+    def __init__(self, name: str, cid: str, config: JobConfig):
+        self.name = name
+        self.cid = cid
+        self.config = config
+
+    def __str__(self):
+        return f"Job(cid={self.cid}, name={self.name})"
+
+    def in_schedule(self, schedule: str):
+        """
+        returns whether or not a given schedule includes this job.
+        """
+        return schedule in self.config.schedules()
+
+    def repository(self, dumpdir: str) -> FilesystemRepository:
+        """
+        Returns a filesystem repository configured with the given dumpdir.
+        """
+        return FilesystemRepository(
+            name=self.name,
+            dumpdir=dumpdir,
+            compress=self.config.compress(),
+            extension=self.config.extension(),
+            part=self.config.part()
+        )
+
+    def dump(
+            self,
+            dumpdir: str,
+            source: 'PodmanSource',
+            datestamp: Optional[datetime]=None
+        ):
+        """
+        Use the given source to execute the dump job.
+        """
+        with self.repository(dumpdir).open(datestamp) as outstream:
+            return source.dump(
+                outstream,
+                self.name,
+                self.cid,
+                self.config.execargs(),
+                self.config.dumpcmd()
+            )
+
+    def prune(self, dumpdir: str):
+        """
+        Prune old dumps.
+        """
+        if self.config.keep():
+            repo = self.repository(dumpdir)
+            repo.prune(self.config.keep())
+
+
+class PodmanContainer:
+    """
+    Represents a podman container with podman-dump configuration.
+    """
+    podman_executable: str = "podman"
+    log = logging.getLogger("PodmanContainer")
+
+    cid: str
+    name: str
+    config: dict
+
+    def __init__(self, cid: str, name: str):
+        self.cid = cid
+        self.name = name
+
+    def __str__(self):
+        return f"Container(cid={self.cid}, name={self.name})"
+
+    def jobs(self) -> Sequence[Job]:
+        """
+        Return a list of jobs.
+        """
+        cmd = [self.podman_executable, 'container', 'inspect', self.cid,
+               '--format', '{{index .Config.Labels "ch.znerol.podman-dump"}}',
+        ]
+        output = subprocess.check_output(cmd, text=True)
+        config = json.loads(output or "{}")
+        entries = config.get('jobs', [])
+        return (Job(self.name, self.cid, JobConfig(entry)) for entry in entries)
+
+
+class PodmanSource:
+    """
+    Represents a podman container data source.
+    """
+    podman_executable: str = "podman"
+    log = logging.getLogger("PodmanSource")
+
+    def containers(self) -> Sequence[PodmanContainer]:
+        """
+        List available containers with a ch.znerol.podman-dump label
+        """
+        self.log.debug("Listing containers")
+
+        cmd = [self.podman_executable, 'ps',
+                '--filter', 'status=running',
+                '--filter', 'label=ch.znerol.podman-dump',
+                '--format', '{{.ID}} {{.Names}}',
+        ]
+        lines = subprocess.check_output(cmd, text=True).splitlines()
+        result = [PodmanContainer(*line.split()) for line in lines]
+
+        self.log.debug("Found %i containers", len(result))
+        return result
+
+    def dump(
+        self,
+        outstream: BinaryIO,
+        name: str,
+        cid: str,
+        execargs: Sequence[str],
+        dumpcmd: Sequence[str],
+    ):
+        """
+        Dump one container job, stream output to binary outstream.
+        """
+        self.log.debug("Start dumping %s", name)
+
+        if len(dumpcmd) > 0:
+            cmd = [self.podman_executable, 'exec'] + execargs + [cid] + dumpcmd
+            with subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=None
+            ) as process:
+                try:
+                    shutil.copyfileobj(process.stdout, outstream)
+                    retcode = process.wait()
+                except:
+                    process.kill()
+                    raise
+
+                if retcode:
+                    raise subprocess.CalledProcessError(retcode, cmd[0])
+
+            self.log.debug("Finished dumping %s", name)
+
+        else:
+            self.log.warning("Skipped %s, no command specified in job config", name)
+
+
+def main(prog, args):
+    """
+    podman-dump main procedure
+    """
+    parser = argparse.ArgumentParser(prog=prog)
+
+    parser.add_argument(
+        "-p", "--prune", action="store_true", dest="prune",
+        help="Prune old backups after dumping a container",
+    )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", dest="verbose",
+        help="Turn on verbose logging"
+    )
+    parser.add_argument(
+        "dumpdir", type=str,
+        help="The destination directory for container dumps"
+    )
+    parser.add_argument(
+        "schedule", type=str,
+        help="Name of the schedule to run"
+    )
+
+    options = parser.parse_args(args)
+
+    level = logging.DEBUG if options.verbose else logging.INFO
+    logging.basicConfig(level=level)
+
+    source = PodmanSource()
+
+    for container in source.containers():
+        datestamp = datetime.now()
+        jobs = [job for job in container.jobs() if job.in_schedule(options.schedule)]
+        for job in jobs:
+            job.dump(options.dumpdir, source, datestamp)
+
+        if options.prune:
+            for job in jobs:
+                job.prune(options.dumpdir)
+
+
+if __name__ == "__main__":
+    main(sys.argv[0], sys.argv[1:])
