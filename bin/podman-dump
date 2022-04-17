@@ -291,14 +291,15 @@ class PodmanContainer:
     """
     Represents a podman container with podman-dump configuration.
     """
-    podman_executable: str = "podman"
+    podman_cmd: Sequence[str] = []
     log = logging.getLogger("PodmanContainer")
 
     cid: str
     name: str
     config: dict
 
-    def __init__(self, cid: str, name: str):
+    def __init__(self, podman_cmd: Sequence[str], cid: str, name: str):
+        self.podman_cmd = podman_cmd
         self.cid = cid
         self.name = name
 
@@ -309,7 +310,7 @@ class PodmanContainer:
         """
         Return a list of jobs.
         """
-        cmd = [self.podman_executable, 'container', 'inspect', self.cid,
+        cmd = self.podman_cmd + ['container', 'inspect', self.cid,
                '--format', '{{index .Config.Labels "ch.znerol.podman-dump"}}',
         ]
         output = subprocess.check_output(cmd, text=True)
@@ -322,8 +323,15 @@ class PodmanSource:
     """
     Represents a podman container data source.
     """
-    podman_executable: str = "podman"
+    podman_cmd: Sequence[str] = ["podman"]
     log = logging.getLogger("PodmanSource")
+
+    def __init__(self, podman: Optional[str], conmon: Optional[str]):
+        if podman:
+            self.podman_cmd = [podman]
+        if conmon:
+            self.podman_cmd.append('--conmon')
+            self.podman_cmd.append(conmon)
 
     def containers(self) -> Sequence[PodmanContainer]:
         """
@@ -331,13 +339,14 @@ class PodmanSource:
         """
         self.log.debug("Listing containers")
 
-        cmd = [self.podman_executable, 'ps',
+        cmd = self.podman_cmd + [
+                'ps',
                 '--filter', 'status=running',
                 '--filter', 'label=ch.znerol.podman-dump',
                 '--format', '{{.ID}} {{.Names}}',
         ]
         lines = subprocess.check_output(cmd, text=True).splitlines()
-        result = [PodmanContainer(*line.split()) for line in lines]
+        result = [PodmanContainer(self.podman_cmd, *line.split()) for line in lines]
 
         self.log.debug("Found %i containers", len(result))
         return result
@@ -356,7 +365,7 @@ class PodmanSource:
         self.log.debug("Start dumping %s", name)
 
         if len(dumpcmd) > 0:
-            cmd = [self.podman_executable, 'exec'] + execargs + [cid] + dumpcmd
+            cmd = self.podman_cmd + ['exec'] + execargs + [cid] + dumpcmd
             with subprocess.Popen(
                 cmd,
                 stdin=subprocess.DEVNULL,
@@ -394,6 +403,14 @@ def main(prog, args):
         help="Turn on verbose logging"
     )
     parser.add_argument(
+        "--podman", dest="podman",
+        help="Path of the podman binary",
+    )
+    parser.add_argument(
+        "--conmon", dest="conmon",
+        help="Path of the conmon binary",
+    )
+    parser.add_argument(
         "dumpdir", type=str,
         help="The destination directory for container dumps"
     )
@@ -407,7 +424,7 @@ def main(prog, args):
     level = logging.DEBUG if options.verbose else logging.INFO
     logging.basicConfig(level=level)
 
-    source = PodmanSource()
+    source = PodmanSource(podman=options.podman, conmon=options.conmon)
 
     for container in source.containers():
         datestamp = datetime.now()

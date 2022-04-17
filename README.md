@@ -10,6 +10,16 @@ Dependencies
 
 Podman-dump requires `podman` und `Python >= 3.6`.
 
+Note that `conmon` version < 2.0.26 is affected by containers/conmon#236.
+Unfortunately, this bug affects `conmon` shipped in
+[Debian 11 (Bullseye)][conmon bullseye] as well as
+[Ubuntu 22.04 (Jammy Jellyfish][conmon jammy]).
+
+Use the `--conmon` flag of `podman-dump` to specify a more recent `conmon`
+version to be used during dumps.
+
+[conmon bullseye]: https://packages.debian.org/bullseye/conmon
+[conmon jammy]: https://packages.ubuntu.com/jammy/conmon
 
 Install
 -------
@@ -72,15 +82,19 @@ Usage
 
 ```
 usage: podman-dump [-h] [-p] [-v] dumpdir schedule
+usage: podman-dump [-h] [-p] [-v] [--podman PODMAN] [--conmon CONMON] dumpdir schedule
 
 positional arguments:
-  dumpdir        The destination directory for container dumps
-  schedule       Name of the schedule to run
+  dumpdir          The destination directory for container dumps
+  schedule         Name of the schedule to run
 
 optional arguments:
-  -h, --help     show this help message and exit
-  -p, --prune    Prune old backups after dumping a container
-  -v, --verbose  Turn on verbose logging
+  -h, --help       show this help message and exit
+  -p, --prune      Prune old backups after dumping a container
+  -v, --verbose    Turn on verbose logging
+  --podman PODMAN  Path of the podman binary
+  --conmon CONMON  Path of the conmon binary
+
 ```
 
 

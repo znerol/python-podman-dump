@@ -4,7 +4,7 @@ podman-dump
 Synopsis
 --------
 
-**podman-dump** [*-p*] [*-v*] [*dumpdir*] [*schedule*]
+**podman-dump** [*-p*] [*-v*] [*--podman PODMAN*] [*--conmon CONMON*] [*dumpdir*] [*schedule*]
 
 
 Description
