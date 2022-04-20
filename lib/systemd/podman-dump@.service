@@ -5,6 +5,6 @@ Documentation=man:podman-dump
 [Service]
 ExecStartPre=/bin/mkdir -p ${PODMAN_DUMP_DIR}
 ExecStart=/usr/bin/env \
-    podman-dump ${PODMAN_DUMP_FLAGS} ${PODMAN_DUMP_DIR} %i
+    podman-dump $PODMAN_DUMP_FLAGS ${PODMAN_DUMP_DIR} %i
 
 SyslogIdentifier=podman-dump
