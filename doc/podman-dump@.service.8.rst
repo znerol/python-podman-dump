@@ -34,6 +34,12 @@ Environment
    ``/var/backups/podman/%i`` when run in systemd ``system`` scope and
    ``~/.local/backups/podman/%i`` when run in ``user`` scope.
 
+.. envvar:: PODMAN_DUMP_JOBDIR
+
+   Path of the directory where job definitions are stored. Defaults to
+   ``/etc/podman-dump/jobs`` when run in systemd ``system`` scope and
+   ``~/.config/podman-dump/jobs`` when run in ``user`` scope.
+
 .. envvar:: PODMAN_DUMP_FLAGS
 
    Flags used when invoking ``podman-dump``.

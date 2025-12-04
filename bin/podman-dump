@@ -234,6 +234,44 @@ class JobConfig:
         return result
 
 
+class JobDirectory:
+    """
+    Represents a directory of named job templates.
+    """
+    log = logging.getLogger("JobDirectory")
+
+    jobdir: Path
+    jobmap: Optional[Mapping] = None
+
+    def __init__(self, jobdir: Optional[str] = None):
+        self.jobdir = Path(jobdir if jobdir else "/etc/podman-dump/jobs")
+
+    def jobs(self, name: str) -> Sequence[JobConfig]:
+        """
+        Return a list of jobs.
+        """
+
+        if self.jobmap is None:
+            self.jobmap = {}
+            if self.jobdir.is_dir():
+                for child in self.jobdir.iterdir():
+                    if child.suffix != ".json":
+                        continue
+                    with child.open() as instream:
+                        config = json.load(instream)
+                    if 'jobs' not in config:
+                        self.log.warning("Skipped %s, no jobs found in config", child)
+                        continue
+
+                    entries = config.get('jobs', [])
+                    self.jobmap[Path(child.stem).name] = (JobConfig(entry) for entry in entries)
+
+        if name not in self.jobmap:
+            self.log.warning("No config found for %s in %s", name, self.jobdir)
+
+        return self.jobmap.get(name, [])
+
+
 class Job:
     """
     Represents one dump job of a specific container
@@ -314,7 +352,7 @@ class PodmanContainer:
     def __str__(self):
         return f"Container(cid={self.cid}, name={self.name})"
 
-    def jobs(self) -> Sequence[Job]:
+    def jobs(self, directory: JobDirectory) -> Sequence[Job]:
         """
         Return a list of jobs.
         """
@@ -323,8 +361,15 @@ class PodmanContainer:
         ]
         output = subprocess.check_output(cmd, text=True)
         config = json.loads(output or "{}")
-        entries = config.get('jobs', [])
-        return (Job(self.name, self.cid, JobConfig(entry)) for entry in entries)
+        if 'jobsFrom' in config:
+            job_configs = directory.jobs(config['jobsFrom'])
+        elif 'jobs' in config:
+            job_configs = (JobConfig(entry) for entry in config['jobs'])
+        else:
+            self.log.warning("Skipped %s, neither jobsFrom nor jobs found in ch.znerol.podman-dump label", self)
+            job_configs = []
+
+        return (Job(self.name, self.cid, job_config) for job_config in job_configs)
 
 
 class PodmanSource:
@@ -411,6 +456,10 @@ def main(prog, args):
         help="Turn on verbose logging"
     )
     parser.add_argument(
+        "--jobdir", dest="jobdir",
+        help="Path of the directory with job definitions",
+    )
+    parser.add_argument(
         "--podman", dest="podman",
         help="Path of the podman binary",
     )
@@ -432,11 +481,12 @@ def main(prog, args):
     level = logging.DEBUG if options.verbose else logging.INFO
     logging.basicConfig(level=level)
 
+    jobdir = JobDirectory(jobdir=options.jobdir)
     source = PodmanSource(podman=options.podman, conmon=options.conmon)
 
     for container in source.containers():
         datestamp = datetime.now()
-        jobs = [job for job in container.jobs() if job.in_schedule(options.schedule)]
+        jobs = [job for job in container.jobs(jobdir) if job.in_schedule(options.schedule)]
         for job in jobs:
             job.dump(options.dumpdir, source, datestamp)
 
