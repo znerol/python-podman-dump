@@ -4,7 +4,7 @@ podman-dump
 Synopsis
 --------
 
-**podman-dump** [*-p*] [*-v*] [*--podman PODMAN*] [*--conmon CONMON*] [*dumpdir*] [*schedule*]
+**podman-dump** [*-p*] [*-v*] [*--jobsdir JOBSDIR*] [*--podman PODMAN*] [*--conmon CONMON*] [*dumpdir*] [*schedule*]
 
 
 Description
@@ -31,6 +31,21 @@ following form:
           },
         ]
       }
+
+Alternatively, the ``ch.znerol.podman-dump`` label can contain a single
+``jobsFrom`` key which specifies a file to load from the directory specified in
+the ``--jobsdir`` argument. The directory defaults to ``/etc/podman-dump/jobs``.
+With the following configuration ``podman-dump`` would look for a jobs file in
+``/etc/podman-dump/jobs/postgres.json`` (Note: the extension must be present in
+the file path, but it must be absent from the ``jobsFrom`` key).
+
+.. code-block:: json
+
+      {
+         "jobsFrom": "postgres"
+      }
+
+
 
 Each job specification may include the following keys and values:
 
